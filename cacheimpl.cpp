@@ -64,7 +64,7 @@ bool CacheImpl::readObject( const ObjectId& obj_id, std::vector< uint8_t >& resu
     if ( rawBuffer.size() <= headerSize ) {
       // The buffer is too small to event hold the hash code.
       // Invalid.
-      RemoveFromObjectsAndAccessTimes( obj_id );
+      RemoveFromObjects( obj_id );
       return false;
     }
     // First we should have the hash
@@ -80,7 +80,7 @@ bool CacheImpl::readObject( const ObjectId& obj_id, std::vector< uint8_t >& resu
     // Now check if the object id:s match
     if ( bufferObjectId != bufferObjectId ) {
       // Hmm object may be tampered with.
-      RemoveFromObjectsAndAccessTimes( obj_id );
+      RemoveFromObjects( obj_id );
       return false;
     }
 
@@ -91,7 +91,7 @@ bool CacheImpl::readObject( const ObjectId& obj_id, std::vector< uint8_t >& resu
 
     // Now check hash
     if ( Crypt::Sha1Hash( result ) != hash ) {
-      RemoveFromObjectsAndAccessTimes( obj_id );
+      RemoveFromObjects( obj_id );
       return false;
     }
 
@@ -99,19 +99,26 @@ bool CacheImpl::readObject( const ObjectId& obj_id, std::vector< uint8_t >& resu
   } CATCH_RETURN();
 }
 
-void CacheImpl::AddToObjectsAndAccessTimes( const ObjectId& obj_id, const CacheObject& cacheObject )
+void CacheImpl::AddToObjects( const ObjectId& obj_id, CacheObject& cacheObject )
 {
-  RemoveFromObjectsAndAccessTimes( obj_id ); // Remove it in case it is aleady there
+  RemoveFromObjects( obj_id ); // Remove it in case it is aleady there
 
   // Make sure it will fit
   PruneObjects( maxSize_ - cacheObject.size_ );
   currSize_ += cacheObject.size_;
 
-  accessTimes_.insert( make_pair( cacheObject.accessTime_, obj_id ) );
   objects_[ obj_id ] = cacheObject;
+  // Reach into the unordered map to get a reference to actual element stored
+  HashMap::value_type &elem = *objects_.find( obj_id );
+  // Store a pointer to that element inside the element itself. Thay way
+  // we can find the element (key + value) from the value (CacheObject)
+  // that is stored inside the prune list
+  elem.second.mapElement_ = &elem;
+  // Add to prune list
+  pruneList_.push_back( elem.second );
 
   // Make sure structures are in sync
-  assert( objects_.size() == accessTimes_.size() );
+  assert( objects_.size() == pruneList_.size() );
 }
 
 bool CacheImpl::writeObject( const ObjectId& obj_id, const std::vector< uint8_t >& value )
@@ -144,53 +151,29 @@ bool CacheImpl::writeObject( const ObjectId& obj_id, const std::vector< uint8_t 
     // we don't want them updated in case the write throws
     // an exception
 
-    // Create timestamp
-    boost::posix_time::ptime accessTime( boost::posix_time::microsec_clock::local_time() );
-
     CacheObject obj;
     obj.size_ = static_cast< uint32_t > ( value.size() );
-    obj.accessTime_ = accessTime;
 
-    AddToObjectsAndAccessTimes( obj_id, obj );
+    AddToObjects( obj_id, obj );
 
     return true;
   } CATCH_RETURN();
 }
 
-std::auto_ptr< CacheImpl::CacheObject > CacheImpl::RemoveFromObjects( const ObjectId& obj_id )
-{
-  std::auto_ptr< CacheObject> ret;
-  HashMap::iterator it = objects_.find( obj_id );
-  if ( it == objects_.end() ) {
-    return ret;
-  }
-
-  currSize_ -= it->second.size_;
-  ret.reset( new CacheObject( it->second ) );
-  objects_.erase( it );
-
-  return ret;
-}
-
-bool CacheImpl::RemoveFromObjectsAndAccessTimes( const ObjectId& obj_id )
+bool CacheImpl::RemoveFromObjects( const ObjectId& obj_id )
 {
   // Make sure structures are in sync
-  assert( objects_.size() == accessTimes_.size() );
-
-  std::auto_ptr< CacheObject > cacheObj( RemoveFromObjects( obj_id ) );
-  if ( !cacheObj.get() ) {
+  assert( objects_.size() == pruneList_.size() );
+  HashMap::iterator it = objects_.find( obj_id );
+  if ( it == objects_.end() ) {
     return false;
   }
 
-  // Find in accessTimes
-  std::pair< TimeMap::iterator, TimeMap::iterator > range( accessTimes_.equal_range( cacheObj->accessTime_ ) );
-  for ( TimeMap::iterator it = range.first; it != range.second; ++ it ) {
-    if ( it->second == obj_id ) {
-      // Found the entry. Erase it.
-      accessTimes_.erase( it );
-      break;
-    }
-  }
+  currSize_ -= it->second.size_;
+  // Remove object from linked list
+  it->second.unlink();
+  // Remove object from unordered map
+  objects_.erase( it );
 
   return true;
 }
@@ -198,16 +181,15 @@ bool CacheImpl::RemoveFromObjectsAndAccessTimes( const ObjectId& obj_id )
 void CacheImpl::PruneObjects( uint64_t maxCacheSize )
 {
   // Prune objects, oldest first.
-  TimeMap::iterator it = accessTimes_.begin();
+  PruneList::iterator it = pruneList_.begin();
 
-  while ( ( it != accessTimes_.end() ) && ( maxCacheSize < getCurrentSize() ) ) {
-    std::string filename( OsConcatPath( path_, Crypt::EncodeFilenameFromBuffer( it->second, fileExtension ) ) );
+  while ( ( it != pruneList_.end() ) && ( maxCacheSize < getCurrentSize() ) ) {
+    std::string filename( OsConcatPath( path_, Crypt::EncodeFilenameFromBuffer( it->mapElement_->first, fileExtension ) ) );
 
-    RemoveFromObjects( it->second );
-
-    TimeMap::iterator removeIt = it;
+    PruneList::iterator removeIter( it );
     ++ it;
-    accessTimes_.erase( removeIt );
+
+    RemoveFromObjects( removeIter->mapElement_->first );
 
     // The following could thrown an exception if the file is no longer available
     // The user could have restarted the cache after removing a file manually.
@@ -220,7 +202,7 @@ void CacheImpl::PruneObjects( uint64_t maxCacheSize )
   }
 
   // Make sure structures are in sync
-  assert( objects_.size() == accessTimes_.size() );
+  assert( objects_.size() == pruneList_.size() );
 }
 
 bool CacheImpl::eraseObject( const ObjectId& obj_id )
@@ -234,10 +216,10 @@ bool CacheImpl::eraseObject( const ObjectId& obj_id )
       OsDeleteFile( filename );
     } catch ( OsDeleteFileException& ) {
     }
-    RemoveFromObjectsAndAccessTimes( obj_id );
+    RemoveFromObjects( obj_id );
 
     // Make sure structures are in sync
-    assert( objects_.size() == accessTimes_.size() );
+    assert( objects_.size() == pruneList_.size() );
 
     return true;
   } CATCH_RETURN();
@@ -256,30 +238,18 @@ uint64_t CacheImpl::getCurrentSize()
   return currSize_;
 }
 
-
-inline std::time_t to_time_t( boost::posix_time::ptime t)
-{
-  if( t == boost::posix_time::neg_infin ){
-    return 0;
-  } else if( t == boost::posix_time::pos_infin ) {
-    return LONG_MAX;
-  }
-  boost::posix_time::ptime start( boost::gregorian::date( 1970, 1 , 1 ) );
-  return ( t - start ).total_seconds();
-}
-
 void CacheImpl::SaveMetaData()
 {
   std::vector< uint8_t > out;
-  if ( !accessTimes_.empty() ) {
+  if ( !pruneList_.empty() ) {
     // Allocate space for hash
     out.resize( sizeof ( Crypt::Sha1HashValue ) );
 
     std::ostringstream oss;
-    for ( TimeMap::const_iterator it = accessTimes_.begin(); it != accessTimes_.end(); ++ it ) {
-      CacheObject& cacheObject( objects_[ it->second ] );
-      // Write access time, size and object id
-      oss << it->first << " " << cacheObject.size_ << " " << Crypt::Base64Encode( it->second ) << " ";
+    for ( PruneList::const_iterator it = pruneList_.begin(); it != pruneList_.end(); ++ it ) {
+      CacheObject& cacheObject( it->mapElement_->second );
+      // Write size and object id
+      oss <<  cacheObject.size_ << " " << Crypt::Base64Encode( it->mapElement_->first ) << " ";
     }
 
     const std::string& metaData( oss.str() );
@@ -301,7 +271,7 @@ void CacheImpl::LoadMetaData()
 {
   // Clear previous data
   objects_.clear();
-  accessTimes_.clear();
+  pruneList_.clear();
 
   std::vector< uint8_t > in;
   std::string fullPath( OsConcatPath( path_, metaDataFilename ) );
@@ -330,14 +300,13 @@ void CacheImpl::LoadMetaData()
           CacheObject cacheObj;
           std::string encodedObjId;
 
-          if ( ( is >> cacheObj.accessTime_ ) &&
-               ( is >> cacheObj.size_ ) &&
+          if ( ( is >> cacheObj.size_ ) &&
                ( is >> encodedObjId ) ) {
             ObjectId objId( Crypt::Base64Decode( encodedObjId ) );
 
             if ( cacheObj.size_ <= maxSize_ ) {
               // This object will fit, at least after pruning.
-              AddToObjectsAndAccessTimes( objId, cacheObj );
+              AddToObjects( objId, cacheObj );
             }
           }
         }

@@ -18,15 +18,13 @@ typedef unsigned __int32 uint32_t;
 
 #include <vector>
 #include <string>
-#include <map>
-#include <set>
 #include <sstream>
 #include <iostream>
 #include <boost/bind.hpp>
 #include <boost/array.hpp>
 #include <boost/unordered_map.hpp>
 #include <boost/exception/all.hpp>
-#include <boost/date_time/posix_time/posix_time.hpp>
+#include <boost/intrusive/list.hpp>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/rc4.h>

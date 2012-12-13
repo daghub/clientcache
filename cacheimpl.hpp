@@ -6,6 +6,8 @@
 const std::string fileExtension = ".CDF";
 const std::string metaDataFilename = "cache.db";
 
+namespace intrusive = boost::intrusive;
+
 class CacheImpl : public Cache
 {
  public:
@@ -19,19 +21,20 @@ class CacheImpl : public Cache
   virtual uint64_t getCurrentSize();
 
  private:
-  struct CacheObject
+  typedef intrusive::list_base_hook<
+   intrusive::link_mode< intrusive::auto_unlink> > auto_unlink_hook;
+
+  struct CacheObject : public auto_unlink_hook
   {
+    boost::unordered_map< ObjectId, CacheObject >::pointer mapElement_;
     uint32_t size_;
-    boost::posix_time::ptime accessTime_;
   };
 
   void LoadMetaData();
   void SaveMetaData();
 
-  std::auto_ptr< CacheObject > RemoveFromObjects( const ObjectId& obj_id );
-
-  bool RemoveFromObjectsAndAccessTimes( const ObjectId& obj_id );
-  void AddToObjectsAndAccessTimes( const ObjectId& obj_id, const CacheObject& cacheObject );
+  bool RemoveFromObjects( const ObjectId& obj_id );
+  void AddToObjects( const ObjectId& obj_id, CacheObject& cacheObject );
 
   void PruneObjects( uint64_t maxCacheSize );
 
@@ -41,8 +44,8 @@ class CacheImpl : public Cache
   typedef boost::unordered_map< ObjectId, CacheObject > HashMap;
   HashMap objects_;
 
-  typedef std::multimap< boost::posix_time::ptime, ObjectId > TimeMap;
-  TimeMap accessTimes_;
+  typedef intrusive::list< CacheObject, intrusive::constant_time_size< false > > PruneList;
+  PruneList pruneList_;
 
   uint64_t maxSize_;
   uint64_t currSize_;
