@@ -290,7 +290,7 @@ void CacheImpl::LoadMetaData()
       // First, check the has to see that the file is intact.
       Crypt::Sha1HashValue calculatedHash;
       Crypt::Sha1Hash( objectDataBegin, in.end(), calculatedHash.begin() );
-
+       
       if ( hash == calculatedHash ) {
         // Ok, go on
         std::string metaData( objectDataBegin, in.end() );
